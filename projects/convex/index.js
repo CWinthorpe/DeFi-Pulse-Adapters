@@ -1,129 +1,193 @@
 const sdk = require("../../sdk");
-const abi = require('./abi.json')
 const ethers  = require('ethers');
-const curvePools = require('./pools-crv.js');
 const { default: BigNumber } = require("bignumber.js");
+const ABI = require('./abi.json');
+var axios = require('axios');
+const { abi } = require("../../sdk/api");
 
-const poolManager = '0xF403C135812408BFbE8713b5A23a04b3D48AAE31'
-const crv = '0xd533a949740bb3306d119cc777fa900ba034cd52'
-const cvx = '0x4e3fbd56cd56c3e72c1403e103b45db9da5b9d2b'
-const cvxStakingPool = '0xCF50b810E57Ac33B91dCF525C6ddd9881B139332'
+const boosterAddress = "0xF403C135812408BFbE8713b5A23a04b3D48AAE31";
+const currentRegistryAddress = "0x90E00ACe148ca3b23Ac1bC8C240C2a7Dd9c2d7f5";
+const cvxAddress = "0x4e3FBD56CD56c3e72c1403e103b45Db9da5B9D2B";
+const cvxRewardsAddress = "0xCF50b810E57Ac33B91dCF525C6ddd9881B139332";
+const cvxcrvAddress = "0x62B9c7356A2Dc64a1969e19C23e4f579F9810Aa7";
 
-const replacements = [
-  "0x99d1Fa417f94dcD62BfE781a1213c092a47041Bc",
-  "0x9777d7E2b60bB01759D0E2f8be2095df444cb07E",
-  "0x1bE5d71F2dA660BFdee8012dDc58D024448A0A59",
-  "0x16de59092dAE5CcF4A1E6439D611fd0653f0Bd01",
-  "0xd6aD7a6750A7593E092a9B218d66C0A814a3436e",
-  "0x83f798e925BcD4017Eb265844FDDAbb448f1707D",
-  "0x73a052500105205d34Daf004eAb301916DA8190f"
-]
+var allCoins = {};
+
 
 async function tvl(timestamp, block) {
   console.log('convex start')
-  let balances = {};
 
   const poolLength = (await sdk.api.abi.call({
-    target: poolManager,
-    abi: abi.poolLength,
+    target: boosterAddress,
+    abi: ABI.poolLength,
     block
   })).output;
-  const cvxCRVSupply = sdk.api.erc20.totalSupply({
-    target: '0x62B9c7356A2Dc64a1969e19C23e4f579F9810Aa7',
-    block
-  })
-  const cvxStaked = sdk.api.erc20.balanceOf({
-    target: cvx,
-    owner: cvxStakingPool,
-    block
-  })
-  await Promise.all([...Array(Number(poolLength)).keys()].map(async i => {
-    const pool = await sdk.api.abi.call({
-      target: poolManager,
-      block,
-      abi: abi.poolInfo,
+  var poolInfo = [];
+  var calldata = [];
+  for (var i = 0; i < poolLength; i++) {
+    calldata.push({
+      target: boosterAddress,
       params: [i]
     })
-    const tokenSupply = await sdk.api.erc20.totalSupply({
-      target: pool.output.token,
+  }
+  var returnData = await sdk.api.abi.multiCall({
+    abi: ABI.poolInfo,
+    calls: calldata,
+    block
+  })
+  for (var i = 0; i < poolLength; i++) {
+    var pdata = returnData.output[i].output;
+    poolInfo.push(pdata);
+  }
+  await Promise.all([...Array(Number(poolLength)).keys()].map(async i => {
+    console.log("getting supplies and balances for pool " + i + "...");
+
+    var convexsupply = await sdk.api.erc20.totalSupply({
+      target: poolInfo[i].token,
+      block
+    });
+
+    var totalsupply = await sdk.api.erc20.totalSupply({
+      target: poolInfo[i].lptoken,
       block
     })
-    const lpTokenSupply = sdk.api.erc20.totalSupply({
-      target: pool.output.lptoken,
-      block
+
+    var pool = await sdk.api.abi.call({
+      target: currentRegistryAddress,
+      block,
+      abi: ABI.get_pool_from_lp_token,
+      params: poolInfo[i].lptoken
     })
-    const poolData = curvePools.find(crvPool => crvPool.addresses.lpToken.toLowerCase() === pool.output.lptoken.toLowerCase())
-    if(poolData === undefined){
-      console.log(pool.output.lptoken);
-      return;
-    }
-    const swapAddress = poolData.addresses.swap
-    const coinCalls = [...Array(Number(poolData.coins.length)).keys()].map(num => ({
-      target: swapAddress,
-      params: [num]
-    }));
-    const coinsUint = sdk.api.abi.multiCall({
-      abi: abi.coinsUint,
-      calls: coinCalls,
-      block
+
+    var share = ethers.BigNumber.from(convexsupply.output).mul((1e18).toString()).div(totalsupply.output);
+
+    var underlyingcoins = await sdk.api.abi.call({
+      target: currentRegistryAddress,
+      block,
+      abi: ABI.get_underlying_coins,
+      params: pool.output
+    });
+
+    var maincoins = await sdk.api.abi.call({
+      target: currentRegistryAddress,
+      block,
+      abi: ABI.get_coins,
+      params: pool.output
+    });
+
+    var balances = await sdk.api.abi.call({
+      target: currentRegistryAddress,
+      block,
+      abi: ABI.get_underlying_balances,
+      params: pool.output
     })
-    const coinsInt = sdk.api.abi.multiCall({
-      abi: abi.coinsInt,
-      calls: coinCalls,
-      block
-    })
-    let coins = await coinsUint
-    if(!coins.output[0].success){
-      coins = await coinsInt
-    }
-    const coinBalances = await sdk.api.abi.multiCall({
-      abi: 'erc20:balanceOf',
-      calls: coins.output.map(coin=>({
-        target: coin.output,
-        params: [swapAddress]
-      }))
-    })
-    if(poolData.name === "ironbank"){
-      const calls = coins.output.map(coinOutput=>({
-        target: coinOutput.output
-      }))
-      coins = await sdk.api.abi.multiCall({
-        abi: abi.underlying,
-        block,
-        calls
-      })
-      const exchangeRate = await sdk.api.abi.multiCall({
-        abi: abi.exchangeRateStored,
-        block,
-        calls
-      })
-      coinBalances.output = coinBalances.output.map((result, i)=>({
-        ...result,
-        output: BigNumber(result.output).times(exchangeRate.output[i].output).div(1e18).toFixed(0),
-      }))
-    }
-    const resolvedLPSupply = (await lpTokenSupply).output;
-    await Promise.all(coinBalances.output.map(async (coinBalance, index)=>{
-      let coinAddress = coins.output[index].output
-      if(replacements.includes(coinAddress)){
-        coinAddress = "0x6b175474e89094c44da98b954eedeac495271d0f" // dai
+
+    // var underlyingDecimals = await sdk.api.abi.call({
+    //   target: currentRegistryAddress,
+    //   block,
+    //   abi: REGISTRY_ABI.get_underlying_decimals,
+    //   params: pool.output
+    // })
+    
+    // var mainDecimals = await sdk.api.abi.call({
+    //   target: currentRegistryAddress,
+    //   block,
+    //   abi: REGISTRY_ABI.get_decimals,
+    //   params: pool.output
+    // })
+
+    // var decimals = [];
+    // for (var d = 0; d < underlyingDecimals.output.length; d++) {
+    //   if (underlyingDecimals.output[d].toString() == "0") {
+    //     decimals.push(mainDecimals.output[d]);
+    //   } else {
+    //     decimals.push(underlyingDecimals.output[d]);
+    //   }
+    // }
+
+    var coins = [];
+    for (var c = 0; c < underlyingcoins.output.length; c++) {
+      //there are pools (ex. ren) that return underlying coins of 0x0 address. replace those with normal coin address
+      if (underlyingcoins.output[c] == "0x0000000000000000000000000000000000000000") {
+        coins.push(maincoins.output[c]);
+      } else {
+        coins.push(underlyingcoins.output[c]);
       }
-      if(coinBalance.input.target === "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"){
-        coinBalance = await sdk.api.eth.getBalance({
-          target: coinBalance.input.params[0]
-        })
-        coinAddress = '0x0000000000000000000000000000000000000000'
+
+      // //balances returned do not always match the decimals returns
+      // if (maincoins.output[c] == "0x5d3a536E4D6DbD6114cc1Ead35777bAB948E3643") { //cDai
+      //   decimals.output[c] = 18;
+      // }
+      // if (maincoins.output[c] == "0x39AA39c021dfbaE8faC545936693aC917d5E7563") { //cUsdc
+      //   decimals.output[c] = 18;
+      // }
+      // if (maincoins.output[c] == "0xdAC17F958D2ee523a2206206994597C13D831ec7") { //usdt
+      //   decimals.output[c] = 6;
+      // }
+      // if (pool.output == "0x45F783CCE6B7FF23B2ab2D70e416cdb7D6055f51" //ypool
+      //   ||
+      //   pool.output == "0x79a8C46DeA5aDa233ABaFFD40F3A0A2B1e5A4F27" //busd
+      //   ||
+      //   pool.output == "0x06364f10B501e868329afBc005b3492902d6C763" //pax
+      //   ||
+      //   pool.output == "0x2dded6Da1BF5DBdF597C45fcFaa3194e53EcfeAF" //iron
+      //   ||
+      //   pool.output == "0xDeBF20617708857ebe4F679508E7b7863a8A8EeE" //aave
+      //   ||
+      //   pool.output == "0xEB16Ae0052ed37f479f7fe63849198Df1765a733" //saave
+      // ) {
+      //   decimals.output[c] = 18;
+      // }
+    }
+
+    //format decimals
+    var balanceShares = [];
+    for (var b = 0; b < balances.output.length; b++) {
+        //var dec = Math.pow(10, Number(decimals.output[b]));
+        //var formattedBal = new BN(balances[b].toString()).multiply(1e5).divide(dec.toString());
+        //var formattedBal = ethers.BigNumber.from(balances.output[b].toString()).mul(1e5).div(dec.toString());
+        //formattedBal = Number(formattedBal.toString()) / 1e5;
+        balanceShare = ethers.BigNumber.from(balances.output[b].toString()).mul(share).div((1e18).toString());
+        balanceShares.push(balanceShare);
+    }
+
+    //sum pools together
+    for (var c = 0; c < coins.length; c++) {
+      if (coins[c] == "0x0000000000000000000000000000000000000000") break;
+      if (coins[c] == "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE") {
+        coins[c] = '0x0000000000000000000000000000000000000000';
       }
-      const balance = BigNumber(tokenSupply.output).times(coinBalance.output).div(resolvedLPSupply);
-      if(!balance.isZero()){
-        sumSingleBalance(balances, coinAddress, balance.toFixed(0))
+      if (allCoins[coins[c]] == undefined) {
+          allCoins[coins[c]] = balanceShares[c].toString();
+      } else {
+          allCoins[coins[c]] = ethers.BigNumber.from(allCoins[coins[c]]).add(balanceShares[c]).toString();
       }
-    }))
+  }
   }))
-  sumSingleBalance(balances, crv, (await cvxCRVSupply).output)
-  sumSingleBalance(balances, cvx, (await cvxStaked).output)
-  console.log('convex end', balances)
-  return balances
+  
+
+  //staked cvx
+  var cvxStakedSupply = await sdk.api.erc20.totalSupply({
+    target: cvxRewardsAddress,
+    block
+  });
+
+  allCoins[cvxAddress] = cvxStakedSupply.output.toString();
+
+  var cvxcrvSupply = await sdk.api.erc20.totalSupply({
+    target: cvxcrvAddress,
+    block
+  });
+
+  allCoins[cvxcrvAddress] = cvxcrvSupply.output.toString();
+
+  console.log(allCoins);
+
+  return allCoins;
+  // sumSingleBalance(balances, crv, (await cvxCRVSupply).output)
+  // sumSingleBalance(balances, cvx, (await cvxStaked).output)
+  // console.log('convex end', balances)
+  // return balances
 }
 
 
@@ -140,6 +204,6 @@ module.exports = {
   name: 'Convex Finance', // project name
   token: "CVX",              // null, or token symbol if project has a custom token
   category: 'assets',       // allowed values as shown on DefiPulse: 'Derivatives', 'DEXes', 'Lending', 'Payments', 'Assets'
-  start: 1621296000,        // unix timestamp (utc 0) specifying when the project began, or where live data begins
+  start: 12457381,        // unix timestamp (utc 0) specifying when the project began, or where live data begins
   tvl                       // tvl adapter
 }
