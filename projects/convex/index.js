@@ -2,9 +2,13 @@ const sdk = require("../../sdk");
 const ethers  = require('ethers');
 const { default: BigNumber } = require("bignumber.js");
 const ABI = require('./abi.json');
-var axios = require('axios');
 const { abi } = require("../../sdk/api");
 
+//ONLY USED FOR TESTING
+var axios = require('axios');
+
+const addressZero = "0x0000000000000000000000000000000000000000"
+const ethAddress = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE";
 const boosterAddress = "0xF403C135812408BFbE8713b5A23a04b3D48AAE31";
 const currentRegistryAddress = "0x90E00ACe148ca3b23Ac1bC8C240C2a7Dd9c2d7f5";
 const cvxAddress = "0x4e3FBD56CD56c3e72c1403e103b45Db9da5B9D2B";
@@ -39,6 +43,8 @@ async function tvl(timestamp, block) {
     var pdata = returnData.output[i].output;
     poolInfo.push(pdata);
   }
+
+  
   await Promise.all([...Array(Number(poolLength)).keys()].map(async i => {
     console.log("getting supplies and balances for pool " + i + "...");
 
@@ -59,14 +65,12 @@ async function tvl(timestamp, block) {
       params: poolInfo[i].lptoken
     })
 
-    var share = ethers.BigNumber.from(convexsupply.output).mul((1e18).toString()).div(totalsupply.output);
+    if(pool.output == addressZero){
+      console.log("pool " +i +" not in registry yet.")
+      return;
+    }
 
-    var underlyingcoins = await sdk.api.abi.call({
-      target: currentRegistryAddress,
-      block,
-      abi: ABI.get_underlying_coins,
-      params: pool.output
-    });
+    var share = ethers.BigNumber.from(convexsupply.output).mul((1e18).toString()).div(totalsupply.output);
 
     var maincoins = await sdk.api.abi.call({
       target: currentRegistryAddress,
@@ -75,94 +79,46 @@ async function tvl(timestamp, block) {
       params: pool.output
     });
 
-    var balances = await sdk.api.abi.call({
-      target: currentRegistryAddress,
-      block,
-      abi: ABI.get_underlying_balances,
-      params: pool.output
-    })
-
-    // var underlyingDecimals = await sdk.api.abi.call({
-    //   target: currentRegistryAddress,
-    //   block,
-    //   abi: REGISTRY_ABI.get_underlying_decimals,
-    //   params: pool.output
-    // })
-    
-    // var mainDecimals = await sdk.api.abi.call({
-    //   target: currentRegistryAddress,
-    //   block,
-    //   abi: REGISTRY_ABI.get_decimals,
-    //   params: pool.output
-    // })
-
-    // var decimals = [];
-    // for (var d = 0; d < underlyingDecimals.output.length; d++) {
-    //   if (underlyingDecimals.output[d].toString() == "0") {
-    //     decimals.push(mainDecimals.output[d]);
-    //   } else {
-    //     decimals.push(underlyingDecimals.output[d]);
-    //   }
-    // }
-
     var coins = [];
-    for (var c = 0; c < underlyingcoins.output.length; c++) {
-      //there are pools (ex. ren) that return underlying coins of 0x0 address. replace those with normal coin address
-      if (underlyingcoins.output[c] == "0x0000000000000000000000000000000000000000") {
-        coins.push(maincoins.output[c]);
-      } else {
-        coins.push(underlyingcoins.output[c]);
+
+    for (var coinlist = 0; coinlist < maincoins.output.length; coinlist++) {
+      var coin = maincoins.output[coinlist];
+      if(coin == addressZero){
+        continue;
       }
+     // console.log("pool " +i +" coin: " +coin);
 
-      // //balances returned do not always match the decimals returns
-      // if (maincoins.output[c] == "0x5d3a536E4D6DbD6114cc1Ead35777bAB948E3643") { //cDai
-      //   decimals.output[c] = 18;
-      // }
-      // if (maincoins.output[c] == "0x39AA39c021dfbaE8faC545936693aC917d5E7563") { //cUsdc
-      //   decimals.output[c] = 18;
-      // }
-      // if (maincoins.output[c] == "0xdAC17F958D2ee523a2206206994597C13D831ec7") { //usdt
-      //   decimals.output[c] = 6;
-      // }
-      // if (pool.output == "0x45F783CCE6B7FF23B2ab2D70e416cdb7D6055f51" //ypool
-      //   ||
-      //   pool.output == "0x79a8C46DeA5aDa233ABaFFD40F3A0A2B1e5A4F27" //busd
-      //   ||
-      //   pool.output == "0x06364f10B501e868329afBc005b3492902d6C763" //pax
-      //   ||
-      //   pool.output == "0x2dded6Da1BF5DBdF597C45fcFaa3194e53EcfeAF" //iron
-      //   ||
-      //   pool.output == "0xDeBF20617708857ebe4F679508E7b7863a8A8EeE" //aave
-      //   ||
-      //   pool.output == "0xEB16Ae0052ed37f479f7fe63849198Df1765a733" //saave
-      // ) {
-      //   decimals.output[c] = 18;
-      // }
+      if(coin != ethAddress ){
+          var bal = await sdk.api.erc20.balanceOf({
+            target: coin,
+            owner: pool.output,
+            block
+          })
+          //console.log("pool " +i +" coin "+coin +" bal: " +bal.output);
+          coins.push({coin:coin, balance:bal.output});
+      }else{
+        var ethbal = await sdk.api.eth.getBalance({
+          target: pool.output,
+          block
+        })
+        //console.log("get eth for pool " +i +" = " +ethbal.output);
+
+        //use zero address to represent eth
+        coins.push({coin:addressZero, balance:ethbal.output})
+      }
     }
 
-    //format decimals
-    var balanceShares = [];
-    for (var b = 0; b < balances.output.length; b++) {
-        //var dec = Math.pow(10, Number(decimals.output[b]));
-        //var formattedBal = new BN(balances[b].toString()).multiply(1e5).divide(dec.toString());
-        //var formattedBal = ethers.BigNumber.from(balances.output[b].toString()).mul(1e5).div(dec.toString());
-        //formattedBal = Number(formattedBal.toString()) / 1e5;
-        balanceShare = ethers.BigNumber.from(balances.output[b].toString()).mul(share).div((1e18).toString());
-        balanceShares.push(balanceShare);
-    }
 
-    //sum pools together
+    //calc convex share of pool
     for (var c = 0; c < coins.length; c++) {
-      if (coins[c] == "0x0000000000000000000000000000000000000000") break;
-      if (coins[c] == "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE") {
-        coins[c] = '0x0000000000000000000000000000000000000000';
-      }
-      if (allCoins[coins[c]] == undefined) {
-          allCoins[coins[c]] = balanceShares[c].toString();
-      } else {
-          allCoins[coins[c]] = ethers.BigNumber.from(allCoins[coins[c]]).add(balanceShares[c]).toString();
-      }
-  }
+        var balanceShare = ethers.BigNumber.from(coins[c].balance.toString()).mul(share).div((1e18).toString());
+        //balanceShareskeys[c] = balanceShare;
+        if (allCoins[coins[c].coin] == undefined) {
+            allCoins[coins[c].coin] = balanceShare.toString();
+        } else {
+            allCoins[coins[c].coin] = ethers.BigNumber.from(allCoins[coins[c].coin]).add(balanceShare).toString();
+        }
+    }
   }))
   
 
@@ -174,6 +130,7 @@ async function tvl(timestamp, block) {
 
   allCoins[cvxAddress] = cvxStakedSupply.output.toString();
 
+  //cvxcrv supply
   var cvxcrvSupply = await sdk.api.erc20.totalSupply({
     target: cvxcrvAddress,
     block
@@ -183,11 +140,68 @@ async function tvl(timestamp, block) {
 
   console.log(allCoins);
 
+  ////// BEGING TESTING AREA /////////////
+
+  var decimals = {};
+  var keys = Object.keys(allCoins)
+  for(var i = 0; i < keys.length; i++){
+      var dec = await sdk.api.erc20.decimals(keys[i]);
+      decimals[keys[i]] = Number(dec.output);
+  }
+
+  //convert weird stuff
+  var convert = {};
+  convert["0x8e595470ed749b85c6f7669de83eae304c2ec68f"] = 0
+  convert["0x48759f220ed983db51fa7a8c0d2aab8f3ce4166a"] = 0;
+  convert["0x76eb2fe28b36b3ee97f3adae0c69606eedb2a37c"] = 0;
+
+  let values = {};
+  await Promise.all(Object.keys(allCoins).map(async i => {
+    console.log("getting value for token " + i + "..." +allCoins[i]);
+
+    if (i == "0x0000000000000000000000000000000000000000") {
+        var url = "https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=USD";
+    } else {
+        var url = "https://api.coingecko.com/api/v3/simple/token_price/ethereum?contract_addresses=" + i + "&vs_currencies=USD";
+    }
+
+    await axios.get(url)
+      .then(response => {
+          if (response.data.ethereum != undefined) {
+              values[i] = allCoins[i] * Number(response.data.ethereum.usd) / 1e18;
+          } else {
+            if(response.data[i.toLowerCase()] == undefined || response.data[i.toLowerCase()].usd == undefined){
+              var v = 1.0;
+              if(convert[i.toLowerCase()] != undefined){
+                v = convert[i.toLowerCase()];
+              }
+              values[i] = allCoins[i] * v / Math.pow(10,decimals[i]);
+              console.log("could not find value of " +i.toLowerCase() +" -> " +values[i]);
+            }else{
+              values[i] = allCoins[i] * Number(response.data[i.toLowerCase()].usd) / Math.pow(10,decimals[i]);
+            }
+          }
+      })
+      .catch(error => {
+          //console.log(error);
+          var v = 1.0;
+          if(convert[i.toLowerCase()] != undefined){
+            v = convert[i.toLowerCase()];
+          }
+          values[i] = allCoins[i] * v / Math.pow(10,decimals[i]);
+          console.log("fail getting coingecko price: " +i.toLowerCase());
+      });
+  }));
+  console.log(values);
+  var totalusd = 0;
+  for (value in values) {
+      totalusd += (Number(values[value]) / 1e6);
+  }
+  console.log("total usd: " + totalusd + "m");
+
+  //////// END TESTING AREA /////////////
+
   return allCoins;
-  // sumSingleBalance(balances, crv, (await cvxCRVSupply).output)
-  // sumSingleBalance(balances, cvx, (await cvxStaked).output)
-  // console.log('convex end', balances)
-  // return balances
 }
 
 
